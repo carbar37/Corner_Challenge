@@ -1,0 +1,225 @@
+#importing the needed libraries
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+#after uploading the two csv files to Jupyter, we will import them to the notebook as well
+train_df = pd.read_csv("train (15).csv")
+test_df = pd.read_csv("test (15).csv")
+
+#Replace nan values with 0, assuming that no values means 0-0
+
+train_df["Home_Goals"] = train_df["Home_Goals"].fillna(0)
+train_df["Away_Goals"] = train_df["Away_Goals"].fillna(0)
+
+#Calculating an ELO rating of the different teams, for different Leagues
+
+def get_expected_score(rating, opp_rating):
+    exp = (opp_rating - rating) / 400
+    return 1 / (1 + 10**exp)
+
+def get_new_elos(home_rating, away_rating, margin):
+    k = 32
+
+    # score of 0.5 for a tie
+    home_score = 0.5
+    if margin > 0:
+        # score of 1 for a win
+        home_score = 1
+    elif margin < 0:
+        #score of 0 for a loss
+        home_score = 0
+
+    # get expected home score
+    expected_home_score = get_expected_score(home_rating, away_rating)
+    # multiply difference of actual and expected score by k value and adjust home rating
+    new_home_score = home_rating + k * (home_score - expected_home_score)
+
+    # repeat these steps for the away team
+    # away score is inverse of home score
+    away_score = 1 - home_score
+    expected_away_score = get_expected_score(away_rating, home_rating)
+    new_away_score = away_rating + k * (away_score - expected_away_score)
+
+    # return a tuple
+    return (round(new_home_score), round(new_away_score))
+
+#changing the date format for the train and test datasets
+train_df["Date"] = pd.to_datetime(train_df["Date"], format = "%d/%m/%Y")
+
+test_df["Date"] = pd.to_datetime(test_df["Date"], format = "%d/%m/%Y")
+
+
+train_df["LeagueId"].unique()
+
+
+#now calculating the ELO ratings for the different teams in the different leagues
+#tracker dictionaries
+elo_ratings = {}
+elo_tracker = {}
+match_elo = {}
+
+#for each league
+for i in train_df["LeagueId"].unique():
+    #if league not in the tracker, add it
+    if i not in elo_ratings:
+        elo_ratings[i] = {}
+        elo_tracker[i] = {}
+    #otherwise keep going, sort the league data by date
+    league_df = train_df[train_df["LeagueId"] == i].sort_values('Date', ascending=True).reset_index(drop = True)
+    #for each game in the league
+    for j in range(league_df.shape[0]):
+        #define match, and teams playing
+        match = league_df.iloc[j]
+        home_team = match["HomeTeamId"]
+        away_team = match["AwayTeamId"]
+        
+        #for home team
+        if home_team not in elo_ratings[i]:
+            home_elo = 1500
+            elo_ratings[i][home_team] = home_elo
+            elo_tracker[i][home_team] = [home_elo]
+        else:
+            home_elo = elo_ratings[i][home_team]
+            
+        #for away team:
+        if away_team not in elo_ratings[i]:
+            away_elo = 1500
+            elo_ratings[i][away_team] = away_elo
+            elo_tracker[i][away_team] = [away_elo]
+        else:
+            away_elo = elo_ratings[i][away_team]
+        
+        match_elo[match["MatchId"]] = (home_elo,away_elo)
+        
+        #calculate margin for the game:
+        margin = match["Home_Goals"] - match["Away_Goals"]
+        
+        #get new elo ratings:
+        new_elos = get_new_elos(home_elo,away_elo,margin)
+        
+        #add new elos to the dictionaries:
+        elo_ratings[i][home_team] = new_elos[0]
+        elo_tracker[i][home_team].append(new_elos[0])
+        elo_ratings[i][away_team] = new_elos[1]
+        elo_tracker[i][away_team].append(new_elos[1])
+
+#assigning ELO ratings to the dataframes
+Home_elo = []
+Away_elo = []
+
+for i in range(train_df.shape[0]):
+    j = train_df.iloc[i]
+    match = j["MatchId"]
+    Home_elo.append(match_elo[match][0])
+    Away_elo.append(match_elo[match][1])
+
+train_df["home_elo"] = Home_elo
+train_df["away_elo"] = Away_elo
+
+
+#assigning ELO ratings to the teams in the test dataframe
+test_home_elo = []
+test_away_elo = []
+
+for i in range(test_df.shape[0]):
+    #for each match
+    match = test_df.iloc[i]
+    #check if the team was previously in that league
+    if match["LeagueId"] in elo_ratings:
+        if match["HomeTeamId"] in elo_ratings[match["LeagueId"]]: #in which case add its proper elo
+            test_home_elo.append(elo_ratings[match["LeagueId"]][match["HomeTeamId"]])
+        else: #otherwise add 1500 since the team is new in that league
+            test_home_elo.append(1500)
+        #same for away team
+        if match["AwayTeamId"] in elo_ratings[match["LeagueId"]]:
+            test_away_elo.append(elo_ratings[match["LeagueId"]][match["AwayTeamId"]])
+        else:
+            test_away_elo.append(1500)
+            
+
+test_df["home_elo"] = test_home_elo
+test_df["away_elo"] = test_away_elo
+
+#Now we have the elo ratings for the teams, let's prepare the data and get started on the Poisson model
+
+train_day = []
+
+for i in range(train_df.shape[0]):
+    match = train_df.iloc[i]
+    train_day.append(match["Date"].day_name())
+
+train_df["GameDay"] = train_day
+
+test_day = []
+
+for i in range(test_df.shape[0]):
+    match = test_df.iloc[i]
+    test_day.append(match["Date"].day_name())
+
+test_df["GameDay"] = test_day
+
+X_test = test_df[["LeagueId","HomeTeamId","AwayTeamId","home_elo","away_elo","GameDay"]]
+X_train = train_df[["LeagueId","HomeTeamId","AwayTeamId","home_elo","away_elo","GameDay"]]
+train_df["Corners"] = train_df["Home_Corners"] + train_df["Away_Corners"]
+y_train = train_df["Corners"]
+
+train_day = X_train["GameDay"].astype("category")
+train_d = dict(enumerate(train_day.cat.categories))
+print(train_d)
+test_day = X_test["GameDay"].astype("category")
+test_d = dict(enumerate(test_day.cat.categories))
+print(test_d)
+
+X_train["GameDay"] = train_day.cat.codes
+X_test["GameDay"] = test_day.cat.codes
+
+
+import statsmodels.api as sm
+exog, endog = sm.add_constant(X_train), y_train
+model = sm.GLM(endog, exog, family=sm.families.Poisson()).fit()
+
+model.summary()
+X_test = sm.add_constant(X_test)
+
+from scipy import stats
+
+p_under = []
+p_at = []
+p_over = []
+
+#for each element of the test data
+for i in range(X_test.shape[0]):
+    #grab the match, and predict the mean of the Poisson distribution
+    trial = X_test.iloc[i]
+    pred = model.predict(trial)
+    
+    #find the line for this particular game
+    line = test_df.iloc[i]["Line"]
+    
+    #getting the probabilities of having different number of corners in a game
+    counts = np.arange(70)
+    probs = stats.poisson.pmf(counts, pred)
+    if int(line) == line:
+        line = int(line)
+        under = probs[:line].sum()
+        at = probs[line]
+        over = probs[line+1:].sum()
+        
+        p_under.append(under)
+        p_at.append(at)
+        p_over.append(over)
+        
+    else:
+        line = round(line)
+        under = probs[:line].sum()
+        over = probs[line:].sum()
+        
+        p_under.append(under)
+        p_at.append(0)
+        p_over.append(over)
+
+test_df["P(Under)"] = p_under
+test_df["P(At)"] = p_at
+test_df["P(Over)"] = p_over
